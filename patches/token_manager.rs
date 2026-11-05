@@ -3940,6 +3940,14 @@ impl TokenManager {
         cooldown_secs: u64,
         reason: &str,
     ) {
+        if self.tokens.len() <= 1 {
+            tracing::warn!(
+                account_id = %account_id,
+                reason = %reason,
+                "Single-account pool: skipping transient failure lockout and sticky session unbind"
+            );
+            return;
+        }
         let resolved_id = self
             .email_to_account_id(account_id)
             .unwrap_or_else(|| account_id.to_string());

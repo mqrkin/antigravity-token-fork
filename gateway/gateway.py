@@ -34,7 +34,7 @@ PROJECT = HOME / '.local/share/agy-backends'
 BACKGROUND_PROXY_MODEL = 'gemini-3.1-flash-lite'
 # Tools already bounds each upstream attempt; a five-minute retry loop only
 # hides the failure and blocks the client long after it stopped being useful.
-PROXY_RETRY_BUDGET = 120
+PROXY_RETRY_BUDGET = 240
 # The shared gate keeps request starts from stampeding a single-account pool.
 # It must never turn one slow upstream into a head-of-line block for every
 # other request, so acquisition is bounded and then bypassed.

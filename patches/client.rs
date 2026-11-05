@@ -581,6 +581,13 @@ impl UpstreamClient {
         if let Some(index) = ordered.iter().position(|url| url.contains("sandbox")) {
             let sandbox = ordered.remove(index);
             ordered.insert(0, sandbox);
+            // On large payloads (>= 64 KB), Daily repeatedly blackholes response headers
+            // for 75s+. Retry Sandbox a second time instead of falling into Daily.
+            if body_len >= 65_536 && ordered.len() > 1 {
+                for slot in ordered.iter_mut().skip(1) {
+                    *slot = sandbox;
+                }
+            }
         }
         ordered
     }
@@ -1495,7 +1502,7 @@ mod tests {
             1024 * 1024,
             threshold,
         );
-        assert_eq!(large, vec![sandbox, daily]);
+        assert_eq!(large, vec![sandbox, sandbox]);
 
         let only_daily = UpstreamClient::reorder_endpoints_for_body(
             vec![daily],
