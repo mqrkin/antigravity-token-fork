@@ -93,3 +93,9 @@ custom-protocol = ["tauri/custom-protocol"]
 [dev-dependencies]
 tempfile = "3.10"
 tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+codegen-units = 16
+lto = false
+incremental = true
+

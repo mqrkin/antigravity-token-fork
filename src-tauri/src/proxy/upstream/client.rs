@@ -749,7 +749,7 @@ impl UpstreamClient {
             .filter(|seconds| (30..=600).contains(seconds))
             .filter(|_| matches!(method, "streamGenerateContent" | "generateContent"));
         let total_budget_secs = header_timeout_override
-            .map(|seconds| seconds * V1_INTERNAL_BASE_URL_FALLBACKS.len() as u64)
+            .map(|seconds| seconds.saturating_add(25))
             .unwrap_or_else(|| Self::calculate_total_upstream_budget_secs(method, body_bytes.len()));
         let call_overall_start = std::time::Instant::now();
         let mut is_capacity_exhausted = false;
@@ -813,7 +813,9 @@ impl UpstreamClient {
                     is_capacity_exhausted,
                 );
                 let watchdog_secs = match header_timeout_override {
-                    Some(seconds) if !is_capacity_exhausted => seconds.min(remaining_budget).max(1),
+                    Some(seconds) if !is_capacity_exhausted && idx == 0 => {
+                        seconds.min(remaining_budget).max(1)
+                    }
                     _ => watchdog_secs,
                 };
                 let send_future = req_builder.send();

@@ -18,7 +18,7 @@ chmod +x "$OPT_DIR/AppRun" "$OPT_DIR/AppRun.wrapped" "$OPT_DIR/usr/bin/antigravi
 cat > "$HOME/.local/bin/antigravity-tools" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export ANTIGRAVITY_HEADER_TIMEOUT_SECS=55
+export ANTIGRAVITY_HEADER_TIMEOUT_SECS=35
 export ANTIGRAVITY_SANDBOX_FIRST_BYTES=0
 exec "$OPT_DIR/AppRun" "\$@"
 EOF
@@ -166,7 +166,7 @@ WorkingDirectory=$HOME
 ExecStart=$HOME/.local/bin/antigravity-tools --headless
 Environment=RUST_LOG=info
 Environment=ANTIGRAVITY_DISABLE_TRAY=1
-Environment=ANTIGRAVITY_HEADER_TIMEOUT_SECS=55
+Environment=ANTIGRAVITY_HEADER_TIMEOUT_SECS=35
 Environment=ANTIGRAVITY_SANDBOX_FIRST_BYTES=0
 Restart=always
 RestartSec=2

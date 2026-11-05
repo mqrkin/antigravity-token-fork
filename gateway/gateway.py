@@ -12,21 +12,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-try:
-    from backend import DEFAULT_MODEL, DEFAULT_LABEL, WEB_LABEL, read_json
-except ImportError:
-    DEFAULT_MODEL = 'gemini-4-argon-medium'
-    DEFAULT_LABEL = 'Gemini 4 Argon (Medium)'
-    WEB_LABEL = 'Gemini Web Pro'
-
-    def read_json(path, default=None):
-        p = Path(path)
-        if not p.exists():
-            return copy.deepcopy(default) if default is not None else {}
-        try:
-            return json.loads(p.read_text(encoding='utf-8'))
-        except Exception:
-            return copy.deepcopy(default) if default is not None else {}
+from backend import DEFAULT_MODEL, DEFAULT_LABEL, WEB_LABEL, read_json
 
 HOME = Path.home()
 STATE = HOME / '.local/state/agy-backends'
@@ -34,11 +20,10 @@ PROJECT = HOME / '.local/share/agy-backends'
 BACKGROUND_PROXY_MODEL = 'gemini-3.1-flash-lite'
 # Tools already bounds each upstream attempt; a five-minute retry loop only
 # hides the failure and blocks the client long after it stopped being useful.
-PROXY_RETRY_BUDGET = 240
+PROXY_RETRY_BUDGET = 300
 # The shared gate keeps request starts from stampeding a single-account pool.
-# It must never turn one slow upstream into a head-of-line block for every
-# other request, so acquisition is bounded and then bypassed.
-PROXY_GATE_WAIT = 5
+# Wait up to 25s for an in-flight heavy prefill to return headers before bypassing.
+PROXY_GATE_WAIT = 25
 PROXY_GATE = None
 PROXY_BLOCK_UNTIL = 0.0
 CACHE_CHUNK_CHARS = 32000
@@ -47,7 +32,7 @@ oauth_lock = asyncio.Lock()
 
 
 def current_mode():
-    return read_json(STATE / 'route.json', {'mode': 'proxy'}).get('mode', 'proxy')
+    return read_json(STATE / 'route.json', {'mode': 'web'})['mode']
 
 
 def get_proxy_gate():
@@ -306,7 +291,7 @@ async def generate(path, request: Request):
         else:
             url = target['base'] + '/models/' + model_name + ':' + method
             headers = {'Authorization': 'Bearer ' + target['key'], 'x-goog-api-key': target['key']}
-        client = httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10), trust_env=False)
+        client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10), trust_env=False)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + PROXY_RETRY_BUDGET
         backoff = 3

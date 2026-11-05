@@ -176,7 +176,7 @@ Write-Host "[5/6] Configuring headless auto-restart watchdog and Windows Startup
 $RunnerPs1 = Join-Path $InstallDir "run-watchdog.ps1"
 $RunnerContent = @"
 `$env:ANTIGRAVITY_DISABLE_TRAY = "1"
-`$env:ANTIGRAVITY_HEADER_TIMEOUT_SECS = "55"
+`$env:ANTIGRAVITY_HEADER_TIMEOUT_SECS = "35"
 `$env:ANTIGRAVITY_SANDBOX_FIRST_BYTES = "0"
 `$InstallDir = "$InstallDir"
 `$TargetExe = "$TargetExe"
