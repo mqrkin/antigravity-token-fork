@@ -1,0 +1,32 @@
+name: Build Windows Binary
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build antigravity-tools.exe
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --bin antigravity-tools
+      - name: Publish Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Copy-Item "src-tauri\target\release\antigravity-tools.exe" "antigravity-tools.exe"
+          Compress-Archive -Path "antigravity-tools.exe","install.ps1","login.py","INSTALL_FOR_LLM.md","gateway" -DestinationPath "antigravity-fork-windows.zip" -Force
+          if (gh release view v5.0.0-tokeneff 2>$null) {
+            gh release upload v5.0.0-tokeneff antigravity-tools.exe antigravity-fork-windows.zip --clobber
+          } else {
+            gh release create v5.0.0-tokeneff antigravity-tools.exe antigravity-fork-windows.zip --title "Antigravity Token-Efficient Fork (Windows)" --notes "Headless token-efficient fork for Windows + gateway.py"
+          }
