@@ -465,6 +465,16 @@ pub async fn handle_generate(
                     max_attempts,
                     e
                 );
+                if pool_size <= 1
+                    && upstream_req_start.elapsed() >= std::time::Duration::from_secs(90)
+                    && e.contains("waiting for response headers")
+                {
+                    tracing::warn!(
+                        "Skipping redundant single-account retry after {}s header timeout to avoid self-DDoS",
+                        upstream_req_start.elapsed().as_secs()
+                    );
+                    break;
+                }
                 continue;
             }
         };

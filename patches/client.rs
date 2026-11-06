@@ -574,7 +574,9 @@ impl UpstreamClient {
         body_len: usize,
         sandbox_first_threshold: usize,
     ) -> Vec<&'a str> {
-        if body_len < sandbox_first_threshold || (sandbox_first_threshold > 0 && body_len == sandbox_first_threshold) {
+        if body_len < sandbox_first_threshold
+            || (sandbox_first_threshold > 0 && body_len == sandbox_first_threshold)
+        {
             return endpoints;
         }
         let mut ordered = endpoints;
@@ -582,11 +584,10 @@ impl UpstreamClient {
             let sandbox = ordered.remove(index);
             ordered.insert(0, sandbox);
             // On large payloads (>= 64 KB), Daily repeatedly blackholes response headers
-            // for 75s+. Retry Sandbox a second time instead of falling into Daily.
+            // for 75s+, and a second shorter attempt on Sandbox only wastes time.
+            // Keep only Sandbox so it gets the full header timeout budget in one shot.
             if body_len >= 65_536 && ordered.len() > 1 {
-                for slot in ordered.iter_mut().skip(1) {
-                    *slot = sandbox;
-                }
+                ordered.truncate(1);
             }
         }
         ordered
@@ -749,8 +750,10 @@ impl UpstreamClient {
             .filter(|seconds| (30..=600).contains(seconds))
             .filter(|_| matches!(method, "streamGenerateContent" | "generateContent"));
         let total_budget_secs = header_timeout_override
-            .map(|seconds| seconds * V1_INTERNAL_BASE_URL_FALLBACKS.len() as u64)
-            .unwrap_or_else(|| Self::calculate_total_upstream_budget_secs(method, body_bytes.len()));
+            .map(|seconds| seconds.saturating_add(25))
+            .unwrap_or_else(|| {
+                Self::calculate_total_upstream_budget_secs(method, body_bytes.len())
+            });
         let call_overall_start = std::time::Instant::now();
         let mut is_capacity_exhausted = false;
 
@@ -813,7 +816,9 @@ impl UpstreamClient {
                     is_capacity_exhausted,
                 );
                 let watchdog_secs = match header_timeout_override {
-                    Some(seconds) if !is_capacity_exhausted => seconds.min(remaining_budget).max(1),
+                    Some(seconds) if !is_capacity_exhausted && idx == 0 => {
+                        seconds.min(remaining_budget).max(1)
+                    }
                     _ => watchdog_secs,
                 };
                 let send_future = req_builder.send();
@@ -1483,18 +1488,12 @@ mod tests {
         let sandbox = "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal";
         let threshold = 128 * 1024;
 
-        let default_zero = UpstreamClient::reorder_endpoints_for_body(
-            vec![daily, sandbox],
-            1024,
-            0,
-        );
+        let default_zero =
+            UpstreamClient::reorder_endpoints_for_body(vec![daily, sandbox], 1024, 0);
         assert_eq!(default_zero, vec![sandbox, daily]);
 
-        let small = UpstreamClient::reorder_endpoints_for_body(
-            vec![daily, sandbox],
-            1024,
-            threshold,
-        );
+        let small =
+            UpstreamClient::reorder_endpoints_for_body(vec![daily, sandbox], 1024, threshold);
         assert_eq!(small, vec![daily, sandbox]);
 
         let large = UpstreamClient::reorder_endpoints_for_body(
@@ -1502,13 +1501,10 @@ mod tests {
             1024 * 1024,
             threshold,
         );
-        assert_eq!(large, vec![sandbox, sandbox]);
+        assert_eq!(large, vec![sandbox]);
 
-        let only_daily = UpstreamClient::reorder_endpoints_for_body(
-            vec![daily],
-            1024 * 1024,
-            threshold,
-        );
+        let only_daily =
+            UpstreamClient::reorder_endpoints_for_body(vec![daily], 1024 * 1024, threshold);
         assert_eq!(only_daily, vec![daily]);
     }
 }

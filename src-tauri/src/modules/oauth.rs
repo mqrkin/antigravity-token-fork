@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 // Google OAuth configuration
-const CLIENT_ID: &str = concat!("1071006060591-tmhssin2h21lcre235vtolojh4g403ep", ".apps.googleusercontent.com");
+const CLIENT_ID: &str = concat!(
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep",
+    ".apps.googleusercontent.com"
+);
 const CLIENT_SECRET: &str = concat!("GOCSPX-", "K58FWR486LdLJ1mLB8sXC4z6qDAf");
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";

@@ -12,7 +12,24 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from backend import DEFAULT_MODEL, DEFAULT_LABEL, WEB_LABEL, read_json
+DEFAULT_MODEL = 'gemini-4-argon-medium'
+DEFAULT_LABEL = 'Gemini 4 Argon (Medium)'
+WEB_LABEL = 'Gemini Web Pro'
+
+
+def read_json(path, default=None):
+    path = Path(path)
+    if not path.exists():
+        return copy.deepcopy(default if default is not None else {})
+    text = path.read_text(encoding='utf-8')
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        text = re.sub(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*[\s\S]*?\*/',
+                      lambda match: match.group(1) or '', text)
+        text = re.sub(r'("(?:\\.|[^"\\])*")|,\s*([}\]])',
+                      lambda match: match.group(1) or match.group(2), text)
+        return json.loads(text)
 
 HOME = Path.home()
 STATE = HOME / '.local/state/agy-backends'
@@ -21,9 +38,10 @@ BACKGROUND_PROXY_MODEL = 'gemini-3.1-flash-lite'
 # Tools already bounds each upstream attempt; a five-minute retry loop only
 # hides the failure and blocks the client long after it stopped being useful.
 PROXY_RETRY_BUDGET = 300
-# The shared gate keeps request starts from stampeding a single-account pool.
-# Wait up to 25s for an in-flight heavy prefill to return headers before bypassing.
-PROXY_GATE_WAIT = 25
+# The shared gate paces request starts and 429 cooldowns without head-of-line
+# blocking concurrent streaming sessions behind a slow prefill.
+PROXY_GATE_WAIT = 15
+PROXY_MIN_PACE_SECONDS = 0.5
 PROXY_GATE = None
 PROXY_BLOCK_UNTIL = 0.0
 CACHE_CHUNK_CHARS = 32000
@@ -32,7 +50,7 @@ oauth_lock = asyncio.Lock()
 
 
 def current_mode():
-    return read_json(STATE / 'route.json', {'mode': 'web'})['mode']
+    return read_json(STATE / 'route.json', {'mode': 'proxy'}).get('mode', 'proxy')
 
 
 def get_proxy_gate():
@@ -173,7 +191,8 @@ async def authenticate(request, call_next):
     config = read_json(HOME / '.config/agy-backends/gateway.json')
     supplied = request.headers.get('authorization', '').removeprefix('Bearer ')
     supplied = supplied or request.headers.get('x-goog-api-key', '') or request.query_params.get('key', '')
-    if not supplied or not secrets.compare_digest(supplied, config['apiKey']):
+    expected = config.get('apiKey', config.get('api_key'))
+    if not isinstance(expected, str) or not expected or not supplied or not secrets.compare_digest(supplied, expected):
         return JSONResponse({'error': {'message': 'Unauthorized'}}, status_code=401)
     return await call_next(request)
 
@@ -248,6 +267,28 @@ def cooldown_wait(raw):
     return int(match.group(1)) if match else None
 
 
+def conversation_model_override(body):
+    """Select an explicitly configured model for one CLI conversation."""
+    instruction = body.get('systemInstruction')
+    if not isinstance(instruction, dict):
+        return None
+    for part in instruction.get('parts') or []:
+        if not isinstance(part, dict) or not isinstance(part.get('text'), str):
+            continue
+        match = re.search(r'(?m)^Conversation ID:\s*([0-9a-fA-F-]{36})\s*$', part['text'])
+        if not match:
+            continue
+        try:
+            conversation_id = str(uuid.UUID(match.group(1)))
+            config = read_json(HOME / '.config/agy-backends/conversation-models.json')
+            models = config.get('conversations', {}) if isinstance(config, dict) else {}
+            model = models.get(conversation_id) if isinstance(models, dict) else None
+        except (ValueError, OSError):
+            return None
+        return model if isinstance(model, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,128}', model) else None
+    return None
+
+
 def proxy_error_is_permanent(raw):
     text = raw.decode('utf-8', 'ignore') if isinstance(raw, (bytes, bytearray)) else str(raw)
     lowered = text.lower()
@@ -270,6 +311,7 @@ async def generate(path, request: Request):
         target = route(mode)
         body = await request.json()
         model_name = target['model']
+        model_override = None
         if is_safety_rater_request(body):
             rater_json = '```json\n{\n  "reason": "Routine local developer action.",\n  "severity": 0,\n  "confidence": 10\n}\n```'
             return local_gemini_response(rater_json, streaming, mode)
@@ -281,8 +323,13 @@ async def generate(path, request: Request):
                 if isinstance(body.get('generationConfig'), dict):
                     body['generationConfig'].pop('thinkingConfig', None)
             else:
-                body.setdefault('generationConfig', {})['thinkingConfig'] = {
-                    'thinkingLevel': 'MEDIUM', 'includeThoughts': True}
+                model_override = conversation_model_override(body)
+                if model_override:
+                    model_name = model_override
+                thinking = {'includeThoughts': True}
+                if not model_name.lower().startswith('claude-'):
+                    thinking['thinkingLevel'] = 'MEDIUM'
+                body.setdefault('generationConfig', {})['thinkingConfig'] = thinking
         if mode == 'oauth':
             auth = await oauth_auth()
             body = oauth_body(body, auth, target)
@@ -291,45 +338,40 @@ async def generate(path, request: Request):
         else:
             url = target['base'] + '/models/' + model_name + ':' + method
             headers = {'Authorization': 'Bearer ' + target['key'], 'x-goog-api-key': target['key']}
-        client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10), trust_env=False)
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), trust_env=False)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + PROXY_RETRY_BUDGET
         backoff = 3
         last_status = 503
         response = None
-        gate = get_proxy_gate() if mode == 'proxy' else None
+        # A different model must not inherit the default model's quota cooldown.
+        gate = get_proxy_gate() if mode == 'proxy' and not model_override else None
         while True:
-            gate_held = False
             try:
                 if gate is not None:
                     try:
                         await asyncio.wait_for(gate.acquire(), timeout=PROXY_GATE_WAIT)
                     except asyncio.TimeoutError:
                         print('proxy gate busy; proceeding without it', flush=True)
-                        gate = None
                     else:
-                        gate_held = True
-                        pause = PROXY_BLOCK_UNTIL - loop.time()
-                        if pause > 0:
-                            await asyncio.sleep(pause)
+                        try:
+                            now = loop.time()
+                            pause = PROXY_BLOCK_UNTIL - now
+                            if pause > 0:
+                                await asyncio.sleep(pause)
+                            PROXY_BLOCK_UNTIL = max(PROXY_BLOCK_UNTIL, loop.time() + PROXY_MIN_PACE_SECONDS)
+                        finally:
+                            gate.release()
                 response = await client.send(client.build_request('POST', url, json=body, headers=headers,
                             params={'alt': 'sse'} if streaming else {}), stream=True)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                     httpx.ReadError, httpx.RemoteProtocolError):
-                if gate_held:
-                    gate.release()
                 if mode != 'proxy' or loop.time() >= deadline:
                     raise
                 await asyncio.sleep(min(backoff, max(0, deadline - loop.time())))
                 backoff = min(backoff * 2, 15)
                 continue
-            except BaseException:
-                if gate_held:
-                    gate.release()
-                raise
             if mode != 'proxy' or response.status_code not in (429, 502, 503, 504):
-                if gate_held:
-                    gate.release()
                 break
             last_status = response.status_code
             wait = None
@@ -339,14 +381,9 @@ async def generate(path, request: Request):
                 wait = cooldown_wait(raw)
                 permanent = proxy_error_is_permanent(raw)
             finally:
-                try:
-                    await response.aclose()
-                finally:
-                    if gate_held:
-                        if wait is not None:
-                            PROXY_BLOCK_UNTIL = max(PROXY_BLOCK_UNTIL, loop.time() + wait)
-                        gate.release()
-                        gate_held = False
+                await response.aclose()
+                if wait is not None and gate is not None:
+                    PROXY_BLOCK_UNTIL = max(PROXY_BLOCK_UNTIL, loop.time() + wait)
             response = None
             if permanent:
                 break

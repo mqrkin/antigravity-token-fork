@@ -47,6 +47,7 @@ if (Test-Path $LocalBuiltExe) {
         Push-Location $RepoDir
         try {
             cargo build --release --manifest-path src-tauri/Cargo.toml --bin antigravity-tools
+            if ($LASTEXITCODE -ne 0) { throw "Building antigravity-tools.exe failed." }
             Copy-Item -Force "src-tauri\target\release\antigravity-tools.exe" $TargetExe
         } finally {
             Pop-Location
@@ -66,8 +67,10 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
     python -m venv $VenvDir
+    if ($LASTEXITCODE -ne 0) { throw "Creating the Python environment failed." }
 }
 & $VenvPython -m pip install --quiet --upgrade pip fastapi uvicorn httpx
+if ($LASTEXITCODE -ne 0) { throw "Installing Python dependencies failed." }
 
 Write-Host "[4/6] Generating clean local configuration (zero third-party accounts)..."
 if ($ResetAccounts) {
@@ -76,39 +79,56 @@ if ($ResetAccounts) {
 }
 
 $InitScript = @'
-import json, pathlib, secrets, sys
+import json, pathlib, re, secrets, sys
 
 tools_dir = pathlib.Path(sys.argv[1])
 agy_cfg_dir = pathlib.Path(sys.argv[2])
 agy_state_dir = pathlib.Path(sys.argv[3])
 agy_cli_dir = pathlib.Path(sys.argv[4])
 
+def read_object(path):
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        text = re.sub(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*[\s\S]*?\*/',
+                      lambda match: match.group(1) or '', text)
+        text = re.sub(r'("(?:\\.|[^"\\])*")|,\s*([}\]])',
+                      lambda match: match.group(1) or match.group(2), text)
+        value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected an object in {path}")
+    return value
+
 gui_cfg_path = tools_dir / "gui_config.json"
-try:
-    gui_cfg = json.loads(gui_cfg_path.read_text(encoding="utf-8")) if gui_cfg_path.exists() else {}
-except Exception:
-    gui_cfg = {}
+gw_cfg_path = agy_cfg_dir / "gateway.json"
+settings_path = agy_cli_dir / "settings.json"
+gui_cfg = read_object(gui_cfg_path)
+gw_cfg = read_object(gw_cfg_path)
+settings = read_object(settings_path)
+
+for key, value in {
+    "language": "en", "theme": "system", "auto_refresh": True,
+    "refresh_interval": 15, "auto_sync": False, "sync_interval": 5,
+}.items():
+    gui_cfg.setdefault(key, value)
 
 proxy_cfg = gui_cfg.setdefault("proxy", {})
 proxy_key = proxy_cfg.get("api_key") or ("sk-ag-proxy-" + secrets.token_hex(16))
 proxy_cfg.update({
     "enabled": True,
     "allow_lan_access": False,
-    "auth_mode": "all",
+    "auth_mode": "all_except_health",
     "port": 8045,
     "api_key": proxy_key,
     "auto_start": True,
     "request_timeout": 300,
     "enable_logging": True,
-    "custom_mapping": {
-        "internal-background-task": "gemini-3.1-flash-lite"
-    },
-    "multimodal": {
-        "enable_sliding_window": True,
-        "max_fresh_images": 6
-    }
 })
-proxy_cfg.pop("preferred_account_id", None)
+proxy_cfg.setdefault("custom_mapping", {})["internal-background-task"] = "gemini-3.1-flash-lite"
+proxy_cfg.setdefault("multimodal", {}).update({"enable_sliding_window": True, "max_fresh_images": 6})
 gui_cfg_path.write_text(json.dumps(gui_cfg, indent=2) + "\n", encoding="utf-8")
 
 (tools_dir / "update_settings.json").write_text(json.dumps({
@@ -123,21 +143,16 @@ accounts_index = tools_dir / "accounts.json"
 if not accounts_index.exists():
     accounts_index.write_text(json.dumps({"accounts": [], "current_account_id": None}, indent=2) + "\n", encoding="utf-8")
 
-gw_cfg_path = agy_cfg_dir / "gateway.json"
-try:
-    gw_cfg = json.loads(gw_cfg_path.read_text(encoding="utf-8")) if gw_cfg_path.exists() else {}
-except Exception:
-    gw_cfg = {}
-
-gw_key = gw_cfg.get("api_key") or ("sk-ag-gw-" + secrets.token_hex(24))
+gw_key = gw_cfg.get("apiKey") or gw_cfg.get("api_key") or ("sk-ag-gw-" + secrets.token_hex(24))
 gw_cfg.update({
-    "api_key": gw_key,
+    "apiKey": gw_key,
     "proxy": {
         "base_url": "http://127.0.0.1:8045",
         "api_key": proxy_key,
         "model": "gemini-4-argon-medium"
     }
 })
+gw_cfg.pop("api_key", None)
 gw_cfg_path.write_text(json.dumps(gw_cfg, indent=2) + "\n", encoding="utf-8")
 
 (agy_cfg_dir / "selection.json").write_text(json.dumps({"mode": "proxy"}, indent=2) + "\n", encoding="utf-8")
@@ -145,32 +160,27 @@ gw_cfg_path.write_text(json.dumps(gw_cfg, indent=2) + "\n", encoding="utf-8")
 
 client_data = {
     "apiKey": gw_key,
-    "baseUrl": "http://127.0.0.1:5919",
-    "customModels": {
-        "Gemini 4 Argon (Medium)": {
-            "model": "gemini-4-argon-medium",
-            "modelProvider": "gemini",
-            "apiKey": gw_key,
-            "baseUrl": "http://127.0.0.1:5919"
-        }
-    }
+    "endpoint": "http://127.0.0.1:5919",
 }
 (agy_cfg_dir / "client.json").write_text(json.dumps(client_data, indent=2) + "\n", encoding="utf-8")
 
-settings_path = agy_cli_dir / "settings.json"
-try:
-    settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
-except Exception:
-    settings = {}
 settings["model"] = "Gemini 4 Argon (Medium)"
 settings["modelProvider"] = "gemini"
-settings["customModels"] = client_data["customModels"]
+settings.setdefault("customModelsConfig", {}).setdefault("customModels", {})["agy-current"] = {
+    "modelId": "agy-current", "modelName": "gemini-api://agy-current",
+    "label": "Gemini 4 Argon (Medium)", "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+    "maxTokens": 131072,
+    "modelFeatures": {"supportsImages": True, "supportsAudio": True, "supportsPdf": True,
+                      "supportsVideo": True, "supportsToolCalls": True,
+                      "supportsThinking": True, "zeroShotCapable": True},
+}
 settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 '@
 
 $InitPyPath = Join-Path $InstallDir "init_config.py"
 Set-Content -Path $InitPyPath -Value $InitScript -Encoding UTF8
 & $VenvPython $InitPyPath $ToolsDataDir $AgyCfgDir $AgyStateDir $AgyCliDir
+if ($LASTEXITCODE -ne 0) { throw "Preparing the local configuration failed." }
 
 Write-Host "[5/6] Configuring headless auto-restart watchdog and Windows Startup..."
 $RunnerPs1 = Join-Path $InstallDir "run-watchdog.ps1"
@@ -178,6 +188,7 @@ $RunnerContent = @"
 `$env:ANTIGRAVITY_DISABLE_TRAY = "1"
 `$env:ANTIGRAVITY_HEADER_TIMEOUT_SECS = "35"
 `$env:ANTIGRAVITY_SANDBOX_FIRST_BYTES = "0"
+`$env:ABV_BIND_LOCAL_ONLY = "1"
 `$InstallDir = "$InstallDir"
 `$TargetExe = "$TargetExe"
 `$VenvPython = "$VenvPython"
@@ -204,16 +215,29 @@ Set-Content -Path $VbsPath -Value $VbsContent -Encoding ASCII
 
 Start-Process -FilePath "wscript.exe" -ArgumentList "`"$VbsPath`"" -WindowStyle Hidden
 
-Write-Host "[6/6] Waiting for gateway on http://127.0.0.1:5919/healthz ..."
+Write-Host "[6/6] Waiting for the gateway and Tools proxy ..."
+$GatewayReady = $false
+$ProxyReady = $false
 for ($i = 0; $i -lt 30; $i++) {
+    $GatewayReady = $false
+    $ProxyReady = $false
     try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:5919/healthz" -UseBasicParsing -TimeoutSec 2
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:5919/health" -UseBasicParsing -TimeoutSec 2
         if ($resp.StatusCode -eq 200) {
-            break
+            $GatewayReady = $true
         }
     } catch {}
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8045/health" -UseBasicParsing -TimeoutSec 2
+        if ($resp.StatusCode -eq 200) { $ProxyReady = $true }
+    } catch {}
+    if ($GatewayReady -and $ProxyReady) { break }
     Start-Sleep -Milliseconds 500
+}
+if (-not $GatewayReady -or -not $ProxyReady) {
+    throw "The gateway or Tools proxy failed to start."
 }
 
 Write-Host "Installation complete! Starting Google OAuth login for your account..."
-& $VenvPython (Join-Path $InstallDir "login.py")
+& $VenvPython (Join-Path $InstallDir "login.py") --wait
+if ($LASTEXITCODE -ne 0) { throw "Google sign-in did not complete." }

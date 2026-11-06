@@ -310,12 +310,16 @@ impl InboundThinkingPipeline {
                                                 }
                                             }
                                             if let Some(sid) = session_id {
-                                                crate::proxy::SignatureCache::global()
-                                                    .cache_session_signature(
-                                                        sid,
-                                                        sig_str.to_string(),
-                                                        msg_idx,
-                                                    );
+                                                if !crate::proxy::SignatureCache::global()
+                                                    .has_session_signature_after(sid, msg_idx)
+                                                {
+                                                    crate::proxy::SignatureCache::global()
+                                                        .cache_session_signature(
+                                                            sid,
+                                                            sig_str.to_string(),
+                                                            msg_idx,
+                                                        );
+                                                }
                                             }
                                         } else {
                                             // 异构签名（如从 Gemini 切到 Claude 时遗留的短签名或哨兵）：全量清理剥除，对齐官方形态！
@@ -340,8 +344,16 @@ impl InboundThinkingPipeline {
                                                 }
                                             }
                                             if let Some(sid) = session_id {
-                                                crate::proxy::SignatureCache::global()
-                                                    .cache_session_signature(sid, sig_str.to_string(), msg_idx);
+                                                if !crate::proxy::SignatureCache::global()
+                                                    .has_session_signature_after(sid, msg_idx)
+                                                {
+                                                    crate::proxy::SignatureCache::global()
+                                                        .cache_session_signature(
+                                                            sid,
+                                                            sig_str.to_string(),
+                                                            msg_idx,
+                                                        );
+                                                }
                                             }
                                         } else {
                                             obj.remove("thoughtSignature");

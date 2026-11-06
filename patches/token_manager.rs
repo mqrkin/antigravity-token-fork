@@ -8928,5 +8928,4 @@ mod tests {
         }
         assert!(manager.qos_guardian.is_jailed_or_probing("slow"));
     }
-
 }
